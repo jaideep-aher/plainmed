@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 from difflib import SequenceMatcher
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import streamlit as st
 import textstat
@@ -13,7 +13,7 @@ from scripts.model import BASE_MODEL, MODEL_ID_FILE, predict
 
 
 APP_TITLE = "PlainMed"
-APP_DESCRIPTION = "Simplify medical text into plain language a patient can understand."
+APP_DESCRIPTION = "Turn dense medical text into a patient-ready explanation, glossary, and safety checklist."
 DISCLAIMER = "Educational tool only. This is not medical advice."
 TEST_FILE = Path("data/processed/test.jsonl")
 PRACTICAL_EXAMPLES = [
@@ -31,12 +31,35 @@ REPAIR_PROMPT = (
     "sentences. Explain abbreviations and medical terms. Keep all important warnings and "
     "clinical caveats. Do not add facts that are not in the original."
 )
+BRIEF_PROMPT_TEMPLATE = """
+You are helping a clinician explain medical text to a patient.
+
+Audience: {audience}
+Output style: {mode}
+
+Return only valid JSON with these keys:
+- plain_language: a useful patient-friendly rewrite in short sentences
+- key_points: 3 to 5 important bullets
+- terms_to_know: an object mapping hard medical terms or abbreviations to plain definitions
+- safety_notes: important warnings, uncertainty, or caveats from the original text
+- questions_to_ask: 2 to 4 practical questions a patient could ask a clinician
+
+Rules:
+- Keep the meaning of the original text.
+- Do not add medical facts that are not supported by the original text.
+- Explain abbreviations.
+- Preserve warnings and urgency.
+- Avoid vague reassurance.
+- Use plain language.
+"""
 DATASET_CITATION = (
     "Basu, C., Vasu, R., Yasunaga, M., & Yang, Q. (2023). "
     "Med-EASi: Finely Annotated Dataset and Models for Controllable Simplification of Medical Texts."
 )
 DATASET_LINK = "https://huggingface.co/datasets/cbasu/Med-EASi"
 REPO_LINK = "https://github.com/"
+AUDIENCE_OPTIONS = ["Patient", "Caregiver", "Teen patient"]
+MODE_OPTIONS = ["Plain explanation", "Visit prep", "Discharge-style summary"]
 
 
 def get_api_key() -> Optional[str]:
@@ -107,6 +130,11 @@ def reading_grade(text: str) -> float:
     return round(float(textstat.flesch_kincaid_grade(text)), 1)
 
 
+def sentence_count(text: str) -> int:
+    """Return a rough sentence count for display."""
+    return max(1, textstat.sentence_count(text))
+
+
 def similarity_ratio(first_text: str, second_text: str) -> float:
     """Return a similarity score between two text strings."""
     return SequenceMatcher(None, first_text.lower(), second_text.lower()).ratio()
@@ -152,9 +180,115 @@ def simplify_text(text: str, model_id: str, api_key: str) -> str:
     return predict(text, model_id=BASE_MODEL, api_key=api_key, system_prompt=REPAIR_PROMPT)
 
 
-def render_result(original: str, simplified: str) -> None:
-    """Render original and simplified text side by side with reading-level badges."""
-    left, right = st.columns(2)
+def build_brief_prompt(audience: str, mode: str) -> str:
+    """Build the structured patient brief prompt."""
+    return BRIEF_PROMPT_TEMPLATE.format(audience=audience, mode=mode)
+
+
+def parse_json_object(raw_text: str) -> Dict[str, object]:
+    """Parse a JSON object from model output, with a safe fallback for imperfect output."""
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        start_index = raw_text.find("{")
+        end_index = raw_text.rfind("}")
+        if start_index != -1 and end_index != -1 and end_index > start_index:
+            return json.loads(raw_text[start_index : end_index + 1])
+        return {
+            "plain_language": raw_text.strip(),
+            "key_points": [],
+            "terms_to_know": {},
+            "safety_notes": [],
+            "questions_to_ask": [],
+        }
+
+
+def normalize_list(value: object) -> List[str]:
+    """Convert model JSON values into a list of display strings."""
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def normalize_terms(value: object) -> Dict[str, str]:
+    """Convert model JSON glossary values into a dictionary."""
+    if isinstance(value, dict):
+        return {str(key).strip(): str(item).strip() for key, item in value.items() if str(key).strip()}
+    return {}
+
+
+def build_patient_brief(text: str, model_id: str, api_key: str, audience: str, mode: str) -> Dict[str, object]:
+    """Generate a structured patient brief with useful supporting sections."""
+    plain_language = simplify_text(text, model_id, api_key)
+    brief_input = f"Original medical text:\n{text}\n\nPlain rewrite draft:\n{plain_language}"
+    raw_brief = predict(
+        brief_input,
+        model_id=BASE_MODEL,
+        api_key=api_key,
+        system_prompt=build_brief_prompt(audience, mode),
+    )
+    brief = parse_json_object(raw_brief)
+    brief["plain_language"] = str(brief.get("plain_language") or plain_language).strip()
+    brief["key_points"] = normalize_list(brief.get("key_points"))
+    brief["terms_to_know"] = normalize_terms(brief.get("terms_to_know"))
+    brief["safety_notes"] = normalize_list(brief.get("safety_notes"))
+    brief["questions_to_ask"] = normalize_list(brief.get("questions_to_ask"))
+    return brief
+
+
+def grade_delta(original: str, simplified: str) -> float:
+    """Calculate reading grade improvement from original to simplified text."""
+    return round(reading_grade(original) - reading_grade(simplified), 1)
+
+
+def quality_label(original: str, simplified: str) -> str:
+    """Return a short quality label for the rewrite."""
+    improvement = grade_delta(original, simplified)
+    similarity = similarity_ratio(original, simplified)
+    if improvement >= 2 and similarity < 0.8:
+        return "Strong simplification"
+    if improvement > 0:
+        return "Some simplification"
+    return "Needs review"
+
+
+def render_metric_panel(original: str, simplified: str) -> None:
+    """Render readability, similarity, and basic quality metrics."""
+    original_grade = reading_grade(original)
+    simplified_grade = reading_grade(simplified)
+    col_a, col_b, col_c, col_d = st.columns(4)
+    col_a.metric("Original grade", original_grade)
+    col_b.metric("Plain grade", simplified_grade, delta=-grade_delta(original, simplified))
+    col_c.metric("Similarity", f"{similarity_ratio(original, simplified):.0%}")
+    col_d.metric("Sentences", sentence_count(simplified))
+    st.caption(f"Quality check: {quality_label(original, simplified)}")
+
+
+def render_bullets(title: str, items: List[str]) -> None:
+    """Render a titled bullet list when items exist."""
+    if not items:
+        return
+    st.subheader(title)
+    for item in items:
+        st.markdown(f"- {item}")
+
+
+def render_terms(terms: Dict[str, str]) -> None:
+    """Render a glossary table when terms exist."""
+    if not terms:
+        return
+    st.subheader("Terms to know")
+    st.table([{"Term": term, "Plain meaning": meaning} for term, meaning in terms.items()])
+
+
+def render_result(original: str, brief: Dict[str, object]) -> None:
+    """Render original text and structured patient-ready output."""
+    simplified = str(brief["plain_language"])
+    render_metric_panel(original, simplified)
+
+    left, right = st.columns([1, 1.25])
 
     with left:
         st.subheader("Original")
@@ -165,6 +299,48 @@ def render_result(original: str, simplified: str) -> None:
         st.subheader("Plain language")
         st.write(simplified)
         render_grade_badge("Plain language", reading_grade(simplified))
+        st.download_button(
+            "Download patient brief",
+            data=build_download_text(original, brief),
+            file_name="plainmed_patient_brief.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+
+    lower_left, lower_right = st.columns(2)
+    with lower_left:
+        render_bullets("Key points", normalize_list(brief.get("key_points")))
+        render_terms(normalize_terms(brief.get("terms_to_know")))
+
+    with lower_right:
+        render_bullets("Safety notes", normalize_list(brief.get("safety_notes")))
+        render_bullets("Questions to ask", normalize_list(brief.get("questions_to_ask")))
+
+
+def build_download_text(original: str, brief: Dict[str, object]) -> str:
+    """Build a plain text export for the patient brief."""
+    lines = [
+        "PlainMed patient brief",
+        "",
+        "Original:",
+        original,
+        "",
+        "Plain language:",
+        str(brief["plain_language"]),
+        "",
+        "Key points:",
+    ]
+    lines.extend(f"- {item}" for item in normalize_list(brief.get("key_points")))
+    lines.append("")
+    lines.append("Terms to know:")
+    lines.extend(f"- {term}: {meaning}" for term, meaning in normalize_terms(brief.get("terms_to_know")).items())
+    lines.append("")
+    lines.append("Safety notes:")
+    lines.extend(f"- {item}" for item in normalize_list(brief.get("safety_notes")))
+    lines.append("")
+    lines.append("Questions to ask:")
+    lines.extend(f"- {item}" for item in normalize_list(brief.get("questions_to_ask")))
+    return "\n".join(lines).strip() + "\n"
 
 
 def render_about(model_id: Optional[str]) -> None:
@@ -183,6 +359,12 @@ def run_app() -> None:
 
     examples = load_examples()
     render_example_buttons(examples)
+
+    control_left, control_right = st.columns(2)
+    with control_left:
+        audience = st.selectbox("Audience", AUDIENCE_OPTIONS)
+    with control_right:
+        mode = st.selectbox("Output mode", MODE_OPTIONS)
 
     text = st.text_area(
         "Medical text",
@@ -203,9 +385,9 @@ def run_app() -> None:
             st.error("OpenAI API key is not configured.")
         else:
             try:
-                with st.spinner("Simplifying text..."):
-                    simplified = simplify_text(text.strip(), model_id, api_key)
-                render_result(text.strip(), simplified)
+                with st.spinner("Building patient brief..."):
+                    brief = build_patient_brief(text.strip(), model_id, api_key, audience, mode)
+                render_result(text.strip(), brief)
             except Exception as exc:
                 st.error(f"Could not simplify the text right now: {exc}")
 
