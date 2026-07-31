@@ -3,18 +3,34 @@
 import json
 import os
 from pathlib import Path
+from difflib import SequenceMatcher
 from typing import List, Optional
 
 import streamlit as st
 import textstat
 
-from scripts.model import MODEL_ID_FILE, predict
+from scripts.model import BASE_MODEL, MODEL_ID_FILE, predict
 
 
 APP_TITLE = "PlainMed"
 APP_DESCRIPTION = "Simplify medical text into plain language a patient can understand."
 DISCLAIMER = "Educational tool only. This is not medical advice."
 TEST_FILE = Path("data/processed/test.jsonl")
+PRACTICAL_EXAMPLES = [
+    "Patients in whom cancer is identified require CT of the chest and abdomen to determine extent of tumor spread.",
+    "Since it has a half-life of 3 to 5 minutes, the infusion has to be continuous, and interruption can be fatal.",
+    "If large portions of the body are affected, fluid and electrolyte loss may be significant.",
+]
+PATIENT_REWRITE_PROMPT = (
+    "You rewrite medical text for a patient. Use plain everyday words, short sentences, "
+    "and explain medical terms in context. Keep the meaning, do not add new facts, and do "
+    "not copy the original wording unless it is already simple."
+)
+REPAIR_PROMPT = (
+    "Rewrite this for a patient at about a 6th grade reading level. Use 2 to 4 short "
+    "sentences. Explain abbreviations and medical terms. Keep all important warnings and "
+    "clinical caveats. Do not add facts that are not in the original."
+)
 DATASET_CITATION = (
     "Basu, C., Vasu, R., Yasunaga, M., & Yang, Q. (2023). "
     "Med-EASi: Finely Annotated Dataset and Models for Controllable Simplification of Medical Texts."
@@ -44,28 +60,63 @@ def get_model_id() -> Optional[str]:
 def load_examples(path: Path = TEST_FILE, count: int = 3) -> List[str]:
     """Load example expert sentences from the held-out test JSONL file."""
     if not path.exists():
-        return [
-            "Pancreatitis is common.",
-            "Nausea, vomiting, constipation, severe prostration, restlessness, and irritability are common.",
-            "Some patients have weight loss, rarely enough to become underweight.",
-        ]
+        return PRACTICAL_EXAMPLES[:count]
 
-    examples = []
+    examples = list(PRACTICAL_EXAMPLES[:count])
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():
                 continue
             row = json.loads(line)
-            examples.append(row["expert"])
+            expert_text = row["expert"]
+            if expert_text in examples or not is_practical_medical_example(expert_text):
+                continue
+            examples.append(expert_text)
             if len(examples) == count:
                 break
 
-    return examples
+    return examples[:count]
+
+
+def is_practical_medical_example(text: str) -> bool:
+    """Return whether a sample looks like useful patient-facing medical text."""
+    blocked_terms = ["rate law", "sulfur dioxide", "sulfolene", "authors were able"]
+    medical_terms = [
+        "patient",
+        "patients",
+        "cancer",
+        "infection",
+        "treatment",
+        "diagnosed",
+        "fatal",
+        "body",
+        "fluid",
+        "disease",
+        "clinical",
+        "drug",
+        "blood",
+    ]
+    lowered_text = text.lower()
+    return not any(term in lowered_text for term in blocked_terms) and any(
+        term in lowered_text for term in medical_terms
+    )
 
 
 def reading_grade(text: str) -> float:
     """Return the Flesch-Kincaid grade level for a text string."""
     return round(float(textstat.flesch_kincaid_grade(text)), 1)
+
+
+def similarity_ratio(first_text: str, second_text: str) -> float:
+    """Return a similarity score between two text strings."""
+    return SequenceMatcher(None, first_text.lower(), second_text.lower()).ratio()
+
+
+def needs_rewrite_repair(original: str, simplified: str) -> bool:
+    """Return whether the first rewrite is too close to the original or not easier to read."""
+    if not simplified.strip():
+        return True
+    return similarity_ratio(original, simplified) > 0.82 or reading_grade(simplified) >= reading_grade(original)
 
 
 def render_grade_badge(label: str, grade: float) -> None:
@@ -89,8 +140,16 @@ def render_example_buttons(examples: List[str]) -> None:
 
 
 def simplify_text(text: str, model_id: str, api_key: str) -> str:
-    """Call the fine-tuned model to simplify medical text."""
-    return predict(text, model_id=model_id, api_key=api_key)
+    """Call the fine-tuned model first and fall back when the rewrite is weak."""
+    first_pass = predict(text, model_id=model_id, api_key=api_key, system_prompt=PATIENT_REWRITE_PROMPT)
+    if not needs_rewrite_repair(text, first_pass):
+        return first_pass
+
+    repaired_output = predict(text, model_id=model_id, api_key=api_key, system_prompt=REPAIR_PROMPT)
+    if not needs_rewrite_repair(text, repaired_output):
+        return repaired_output
+
+    return predict(text, model_id=BASE_MODEL, api_key=api_key, system_prompt=REPAIR_PROMPT)
 
 
 def render_result(original: str, simplified: str) -> None:
@@ -112,6 +171,7 @@ def render_about(model_id: Optional[str]) -> None:
     """Render metadata about the model and dataset."""
     with st.expander("About"):
         st.write(f"Fine-tuned model ID: `{model_id or 'Not configured'}`")
+        st.write("The app tries the fine-tuned model first, then uses a stricter rewrite pass if the first answer is too close to the original.")
         st.write(DATASET_CITATION)
         st.link_button("Med-EASi dataset", DATASET_LINK)
         st.link_button("Repository", REPO_LINK)
