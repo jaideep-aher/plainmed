@@ -152,4 +152,5 @@ def run_app() -> None:
     render_about(model_id)
 
 
-run_app()
+if __name__ == "__main__":
+    run_app()
