@@ -9,6 +9,7 @@ from openai import OpenAI
 
 
 BASE_MODEL = "gpt-4o-mini"
+FINE_TUNE_BASE_MODEL = "gpt-4o-mini-2024-07-18"
 SYSTEM_PROMPT = "You rewrite medical text in plain language a patient can understand."
 TRAINING_FILE = Path("data/processed/train.jsonl")
 MODEL_ID_FILE = Path("models/model_id.txt")
@@ -40,7 +41,7 @@ def upload_training_file(client: OpenAI, training_path: Path = TRAINING_FILE) ->
 def launch_fine_tuning_job(
     client: OpenAI,
     training_file_id: str,
-    model: str = BASE_MODEL,
+    model: str = FINE_TUNE_BASE_MODEL,
 ):
     """Launch a supervised fine-tuning job and return the job object."""
     job = client.fine_tuning.jobs.create(
