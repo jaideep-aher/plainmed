@@ -7,18 +7,12 @@ from pathlib import Path
 from statistics import mean
 from typing import Dict, List
 
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/plainmed_matplotlib")
-
-import matplotlib.pyplot as plt
 import textstat
-
-try:
-    from scripts.model import BASE_MODEL, MODEL_ID_FILE, predict
-except ModuleNotFoundError:
-    from model import BASE_MODEL, MODEL_ID_FILE, predict
 
 
 TEST_FILE = Path("data/processed/test.jsonl")
+BASE_MODEL = "gpt-4o-mini"
+MODEL_ID_FILE = Path("models/model_id.txt")
 OUTPUT_DIR = Path("data/outputs")
 RESULTS_FILE = OUTPUT_DIR / "eval_results.csv"
 CHART_FILE = OUTPUT_DIR / "readability_chart.png"
@@ -31,6 +25,15 @@ CSV_COLUMNS = [
     "fk_base",
     "fk_finetuned",
 ]
+
+
+def get_predict_function():
+    """Load the shared prediction helper for package or direct script execution."""
+    try:
+        from scripts.model import predict
+    except ModuleNotFoundError:
+        from model import predict
+    return predict
 
 
 def load_jsonl(path: Path = TEST_FILE) -> List[Dict[str, str]]:
@@ -57,6 +60,7 @@ def fk_grade(text: str) -> float:
 def evaluate_rows(test_rows: List[Dict[str, str]], finetuned_model_id: str) -> List[Dict[str, object]]:
     """Run base and fine-tuned models over all held-out rows and collect readability metrics."""
     results = []
+    predict = get_predict_function()
 
     for index, row in enumerate(test_rows, start=1):
         original = row["expert"]
@@ -122,6 +126,9 @@ def print_summary(rows: List[Dict[str, object]]) -> None:
 
 def save_chart(rows: List[Dict[str, object]], path: Path = CHART_FILE) -> None:
     """Save a bar chart of mean FK grade levels."""
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/plainmed_matplotlib")
+    import matplotlib.pyplot as plt
+
     scores = mean_scores(rows)
     labels = ["Original", "Base", "Fine-tuned"]
     values = [scores["original"], scores["base"], scores["fine_tuned"]]
