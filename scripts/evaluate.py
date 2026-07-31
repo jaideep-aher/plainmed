@@ -12,7 +12,10 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/plainmed_matplotlib")
 import matplotlib.pyplot as plt
 import textstat
 
-from scripts.model import BASE_MODEL, MODEL_ID_FILE, predict
+try:
+    from scripts.model import BASE_MODEL, MODEL_ID_FILE, predict
+except ModuleNotFoundError:
+    from model import BASE_MODEL, MODEL_ID_FILE, predict
 
 
 TEST_FILE = Path("data/processed/test.jsonl")
