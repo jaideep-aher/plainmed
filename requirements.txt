@@ -1,4 +1,5 @@
 datasets==2.21.0
 matplotlib==3.9.4
 openai==1.99.9
+streamlit==1.50.0
 textstat==0.7.4
