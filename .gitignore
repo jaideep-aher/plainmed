@@ -58,6 +58,8 @@ env/
 .env
 
 # Project outputs
-data/processed/
-data/outputs/
+data/processed/*
+data/outputs/*
+!data/processed/.gitkeep
+!data/outputs/.gitkeep
 models/*.txt
