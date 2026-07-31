@@ -114,13 +114,18 @@ def fine_tune_with_retries(max_attempts: int = 2) -> str:
     raise RuntimeError("Fine-tuning did not complete.")
 
 
-def predict(text: str, model_id: str, api_key: Optional[str] = None) -> str:
-    """Rewrite medical text using the supplied model ID and the training system prompt."""
+def predict(
+    text: str,
+    model_id: str,
+    api_key: Optional[str] = None,
+    system_prompt: str = SYSTEM_PROMPT,
+) -> str:
+    """Rewrite medical text using the supplied model ID and system prompt."""
     client = get_client(api_key=api_key)
     response = client.chat.completions.create(
         model=model_id,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": text},
         ],
         temperature=0.2,
