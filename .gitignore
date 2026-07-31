@@ -62,4 +62,7 @@ data/processed/*
 data/outputs/*
 !data/processed/.gitkeep
 !data/outputs/.gitkeep
+!data/outputs/eval_results.csv
+!data/outputs/readability_chart.png
 models/*.txt
+!models/model_id.txt
